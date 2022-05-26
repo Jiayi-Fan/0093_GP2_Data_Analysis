@@ -1,0 +1,234 @@
+# the original data was imported into "01_fastq" directory
+mkdir 01_fastq
+
+# Quality control with FastQC
+mkdir 01_fastqc
+fastqc ./01_fastq/*.fastq.gz -o ./01_fastqc/
+fastqc ./01_trim_fastq/*.fastq.gz -o ./01_trim_fastqc/
+
+
+
+
+# Trimming with Cutadapt
+mkdir 01_trim_fastq
+
+#H3K27ac
+cutadapt -a GATCGGAAGAGCACACGTCTGAACTCCAGTCACCGA -a GATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG -m 10 -o ./01_trim_fastq/H3K27ac_trim.fastq.gz ./01_fastq/H3K27ac.fastq.gz
+
+#H3K4me1
+cutadapt -a GATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG --trim-n -m 10 -o ./01_trim_fastq/H3K4me1_trim.fastq.gz ./01_fastq/H3K4me1.fastq.gz
+
+#H3K4me3
+cutadapt -q 10 --quality-base=64 --trim-n -m 10 -o ./01_trim_fastq/H3K4me3_trim.fastq.gz ./01_fastq/H3K4me3.fastq.gz
+
+#Input
+cutadapt -e 0.1 -q 10 --quality-base=64 --trim-n -m 10 -o ./01_trim_fastq/Input_trim.fastq.gz ./01_fastq/Input.fastq.gz
+
+#POLR2A
+cutadapt -e 0.1 -q 10 --quality-base=64 -a GATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG --trim-n -m 10 -o ./01_trim_fastq/POLR2A_trim.fastq.gz ./01_fastq/POLR2A.fastq.gz
+
+
+
+
+
+# Alignment with Bowtie 1 (and processing the data into BAM files with Samtools)
+# first copy bowtie 1 index into local directory
+cp /public/workspace/chaochenwang/annotation/mm10/bowtie/*.ebwt ./reference/GRCm38 
+
+mkdir 02_bt1_sam
+vi 02_bt1_align.sh
+
+#!/bin/sh
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=24:00:00
+#PBS -l mem=8GB
+#PBS -N Bt1_align
+#PBS -d .
+#PBS -o Bt1_align.out
+#PBS -e Bt1_align.err
+filename=$(ls ./01_trim_fastq/*)
+bytlib load bowtie-1.1.2
+bytlib load samtools-1.9
+for f in $filename
+do
+f1=${f:16}
+filehead=${f1%%.fastq.gz}
+echo $filehead
+zcat 01_trim_fastq/$filehead'.fastq.gz' |
+bowtie ./reference/GRCm38 --phred64-quals --threads 4 -l 15 -q -S - |
+samtools view -bSF 4 -@ 4 > ./02_bt1_sam/$filehead'_aligned.bam'
+done
+
+
+
+
+# Sort and index with Samtools
+vi 02_bt1_sort_index.sh
+
+#!/bin/sh
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=24:00:00
+#PBS -l mem=8GB
+#PBS -N Bt1_Sort_Index
+#PBS -d .
+#PBS -o Bt1_Sort_Index.out
+#PBS -e Bt1_Sort_Index.err
+filename=$(ls ./01_trim_fastq/*)
+bytlib load samtools-1.9
+for f in $filename
+do
+f1=${f:16}
+filehead=${f1%%_trim.fastq.gz}
+echo $filehead
+samtools sort -o ./02_bt1_sam/$filehead'_srt.bam' ./02_bt1_sam/$filehead'_trim_aligned.bam'
+samtools index -@ 4 ./02_bt1_sam/$filehead'_srt.bam'
+done
+
+
+
+
+# Peak calling with MACS2
+mkdir 04_bt1_peaks
+vi 04_bt1_call_peaks.sh
+
+#!/bin/sh
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=24:00:00
+#PBS -l mem=8GB
+#PBS -N Bt1_Call_Peaks
+#PBS -d .
+#PBS -o Bt1_Call_Peaks.out
+#PBS -e Bt1_Call_Peaks.err
+filename=$(ls ./01_trim_fastq/*)
+bytlib load MACS2/2.2.7.1
+for f in $filename
+do
+f1=${f:16}
+filehead=${f1%%_trim.fastq.gz}
+if [[ $filehead != Input ]]; then
+echo $filehead
+macs2 callpeak -t ./02_bt1_sam/$filehead"_srt.bam" \
+	-c ./02_bt1_sam/Input_srt.bam \
+ 	-f BAM -g mm \
+	-n $filehead \
+	--outdir ./04_bt1_peaks
+fi
+done
+
+
+
+
+# Peak annotation with Homer
+source /public/workspace/chaochenwang/.bash_profile
+
+mkdir 04_bt1_annot
+vi 04_bt1_annotate_peaks.sh
+
+#!/bin/sh
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=24:00:00
+#PBS -l mem=8GB
+#PBS -N Bt1_Annotate_Peaks
+#PBS -d .
+#PBS -o Bt1_Annotate_Peaks.out
+#PBS -e Bt1_Annotate_Peaks.err
+source /public/workspace/chaochenwang/.bash_profile
+filename=$(ls ./01_trim_fastq/*)
+for f in $filename
+do
+f1=${f:16}
+filehead=${f1%%_trim.fastq.gz}
+if [[ $filehead != Input ]]; then
+echo $filehead
+annotatePeaks.pl ./04_bt1_peaks/$filehead"_peaks.narrowPeak" mm10 > ./04_bt1_annot/$filehead"_annot.txt"
+fi
+done
+
+
+
+
+
+# Making tag directory with Homer
+# Change the chromosome name in BAM files by adding "chr", so that the peak calling data based on GRCm38 can match with the reference genome mm10 in Homer
+samtools view -h ./H3K4me1_srt.bam | \
+sed -e '/^@SQ/s/SN\:/SN\:chr/' -e '/^[^@]/s/\t/\tchr/2'|awk -F ' ' '$7=($7=="=" || $7=="*"?$7:sprintf("chr%s",$7))' |tr " " "\t" | \
+samtools view -h -b -@ 10 -S - > ./chr_H3K4me1_srt.bam
+
+mkdir TagDir
+
+makeTagDirectory TagDir/H3K27me3_td/ ./02_bt1_sam/chr_H3K27ac_srt.bam
+makeTagDirectory TagDir/H3K27me3_td/ ./02_bt1_sam/chr_H3K27me3_srt.bam
+makeTagDirectory TagDir/H3K4me1_td/ ./02_bt1_sam/chr_H3K4me1_srt.bam
+makeTagDirectory TagDir/H3K4me3_td/ ./02_bt1_sam/chr_H3K4me3_srt.bam
+makeTagDirectory TagDir/POLR2A_td/ ./02_bt1_sam/chr_POLR2A_srt.bam
+makeTagDirectory TagDir/Input_td/ ./02_bt1_sam/chr_Input_srt.bam
+
+
+
+
+
+# Profiling binding site density on gene body with "makeMetaGeneProfile" in Homer
+mkdir 06_profile
+makeMetaGeneProfile.pl rna mm10 \
+-d ./TagDir/POLR2A_td/ \
+./TagDir/H3K27ac_td/ \
+./TagDir/H3K27me3_td/ \
+./TagDir/H3K4me1_td/ \
+./TagDir/H3K4me3_td/ \
+> ./06_profile/MetaGene_profile.txt
+
+
+
+
+# Profiling binding site density 2 kb around TSS with "annotatePeaks.pl" in Homer
+annotatePeaks.pl tss mm10 -hist 50 -ghist \
+-d ./TagDir/POLR2A_td/ \
+./TagDir/H3K27ac_td/ \
+./TagDir/H3K27me3_td/ \
+./TagDir/H3K4me1_td/ \
+./TagDir/H3K4me3_td/ \
+> ./06_profile/Heatmap.txt
+
+
+
+
+# Motif calling with Homer
+# Change the chromosome name in narrowPeak files by adding "chr", so that the peak calling data based on GRCm38 can match with the reference genome mm10 in Homer
+awk '{print "chr"$0}' H3K27ac_peaks.narrowPeak > chr_H3K27ac_peaks.narrowPeak
+awk '{print "chr"$0}' H3K27me3_peaks.narrowPeak > chr_H3K27me3_peaks.narrowPeak
+awk '{print "chr"$0}' H3K4me1_peaks.narrowPeak > chr_H3K4me1_peaks.narrowPeak
+awk '{print "chr"$0}' H3K4me3_peaks.narrowPeak > chr_H3K4me3_peaks.narrowPeak
+awk '{print "chr"$0}' POLR2A_peaks.narrowPeak > chr_POLR2A_peaks.narrowPeak
+
+mkdir 05_pre
+mkdir 05_bt1_motif_H3K27ac
+mkdir 05_bt1_motif_H3K27me3
+mkdir 05_bt1_motif_H3K4me1
+mkdir 05_bt1_motif_H3K4me3
+mkdir 05_bt1_motif_POLR2A
+
+vi 05_bt1_find_motif.sh
+
+#!/bin/sh
+#PBS -l nodes=1:ppn=2
+#PBS -l walltime=24:00:00
+#PBS -l mem=8GB
+#PBS -N Bt1_Find_Motif
+#PBS -d .
+#PBS -o Bt1_Find_Motif.out
+#PBS -e Bt1_Find_Motif.err
+source /public/workspace/chaochenwang/.bash_profile
+for filehead in H3K27ac H3K27me3 H3K4me1 H3K4me3 POLR2A
+do 
+if [[ $filehead != Input ]]; then
+echo $filehead
+findMotifsGenome.pl ./04_bt1_peaks/"chr_"$filehead"_peaks.narrowPeak" /public/workspace/chaochenwang/homer/data/genomes/mm10 ./"05_bt1_motif_"$filehead -preparsedDir ./05_pre -size given -mask
+fi
+done
+
+
+
+
+
+
+
