@@ -1,0 +1,172 @@
+# all the plots were created in R
+
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(pheatmap)
+library(VennDiagram)
+
+
+# POLR2A peak annotation
+annot = read.delim("04_annot/POLR2A_annot.txt", 
+                   header = TRUE, row.names = 1, na.strings = c("NA"))
+
+annotypes = as.factor(annot$Annotation)
+
+# Intergenic, intron, promoter-TSS, TTS
+a = length(grep("Intergenic",annot[,"Annotation"]))
+b = length(grep("intron",annot[,"Annotation"]))
+c = length(grep("promoter-TSS",annot[,"Annotation"]))
+d = length(grep("TTS",annot[,"Annotation"]))
+# non-coding, 5' UTR, exon
+e = length(grep("non-coding",annot[,"Annotation"]))
+f = length(grep("5' UTR",annot[,"Annotation"]))
+g = length(grep("exon",annot[,"Annotation"]))
+u = length(grep("3' UTR",annot[,"Annotation"]))
+
+# combine non-coding, TTS, 3' UTR into one category "others" as they each contain few peaks
+z = e + d + u
+pie.number = c(c,g,b,f,a,z)
+pie.labels = c("promoter-TSS", "exon", "intron", "5' UTR", "Intergenic", "others")
+pie.pct <- round(pie.number/sum(pie.number)*100)
+pie.labels <- paste(pie.labels," ",pie.pct,"%" , sep="")
+pie(pie.number, pie.labels, main = "POLR2A_annot", 
+    radius = 0.9, cex = 0.9, border="white", init.angle = 0,
+    col=brewer.pal(7, "Pastel1"))
+legend("topright", pie.labels, cex = 0.8, fill = brewer.pal(7, "Set1"),y.intersp = 1.6,border = "grey", box.col = "white")
+
+
+
+
+
+# Binding profile around gene body
+metagene = read.delim("06_profile/MetaGene_profile.txt", 
+                      header = TRUE, na.strings = c("NA"))
+submeta = metagene[,c(1,2,5,11,14)]
+names(submeta)<-c("pos","POLR2A", "H3K27ac", "H3K4me1", "H3K4me3")
+tidiedmeta = gather(submeta, type, density,-pos)
+
+a = ggplot(data = tidiedmeta, aes(x=pos, y=density))
+a + geom_line(aes(color = type)) + geom_vline(aes(xintercept = 0), linetype = 3)
+
+
+
+
+# Heat map of binding profile around TSS
+all = read.table("Heatmap.txt", 
+                  header = TRUE, row.names = 1, na.strings = c("NA"))
+m1 = as.matrix(all)
+# normalization
+m1<- log2(m1+1) 
+# sample 2000 genes randomly
+m1 = m1[sample(nrow(m1),2000),]
+# rank according to POLR2A peak density
+m.row.sum<- cbind(m1, rowSums(m1[,1:81]))
+o1<- rev(order(m.row.sum[,406]))
+m.row.sum<- m.row.sum[o1,]
+bk = unique(c(seq(-0.1,3, length=100),seq(3,10.35,length=100)))
+hmcols<- colorRampPalette(c("white","red"))(length(bk)-1)
+pheatmap( m.row.sum[,1:405], cluster_rows = F, cluster_cols = F, col= hmcols, legend=FALSE, show_rownames=FALSE, show_colnames=FALSE)
+
+
+
+
+
+
+# TF motifs
+H3K27ac_motif = read.delim("05_bt1_motif_H3K27ac/knownResults.txt", 
+                           header = TRUE, na.strings = c("NA"))
+H3K27me3_motif = read.delim("05_bt1_motif_H3K27me3/knownResults.txt", 
+                            header = TRUE, na.strings = c("NA"))
+H3K4me1_motif = read.delim("05_bt1_motif_H3K4me1/knownResults.txt", 
+                           header = TRUE, na.strings = c("NA"))
+H3K4me3_motif = read.delim("05_bt1_motif_H3K4me3/knownResults.txt", 
+                           header = TRUE, na.strings = c("NA"))
+POLR2A_motif = read.delim("05_bt1_motif_POLR2A/knownResults.txt", 
+                          header = TRUE, na.strings = c("NA"))
+
+# set the p-value threshold
+H3K27ac_motif = subset(H3K27ac_motif, P.value <= 1e-2)
+H3K27me3_motif = subset(H3K27me3_motif, P.value <= 1e-2)
+H3K4me1_motif = subset(H3K4me1_motif, P.value <= 1e-2)
+H3K4me3_motif = subset(H3K4me3_motif, P.value <= 1e-5)
+POLR2A_motif = subset(POLR2A_motif, P.value <= 1e-5)
+
+# active enhancers - H3K4me1 & H3K27ac
+H3K4me1 = H3K4me1_motif[,c(1,2)]
+H3K27ac = H3K27ac_motif[,c(1,2)]
+enhancers_2 = intersect(H3K4me1, H3K27ac)
+for (i in 1:nrow(enhancers_2)){
+  enhancers_2$H3K4me1_P.value[i] = 
+    subset(H3K4me1_motif, 
+           Motif.Name == enhancers_2[i,1] 
+           & Consensus == enhancers_2[i,2])$P.value
+  enhancers_2$H3K27ac_P.value[i] = 
+    subset(H3K27ac_motif, 
+           Motif.Name == enhancers_2[i,1] 
+           & Consensus == enhancers_2[i,2])$P.value
+}
+# 197 mutual motifs
+
+# active promoters - H3K4me3 & H3K27ac & POLR2A
+H3K4me3 = H3K4me3_motif[,c(1,2)]
+H3K27ac = H3K27ac_motif[,c(1,2)]
+POLR2A = POLR2A_motif[,c(1,2)]
+promoters2.0 = intersect(H3K4me3, H3K27ac)
+promoters3.0 = intersect(promoters2.0,POLR2A)
+for (i in 1:nrow(promoters3.0)){
+  promoters3.0$POLR2A_P.value[i] = 
+    subset(POLR2A_motif, 
+           Motif.Name == promoters3.0[i,1] 
+           & Consensus == promoters3.0[i,2])$P.value
+  promoters3.0$H3K4me3_P.value[i] = 
+    subset(H3K4me3_motif, 
+           Motif.Name == promoters3.0[i,1] 
+           & Consensus == promoters3.0[i,2])$P.value
+  promoters3.0$H3K27ac_P.value[i] = 
+    subset(H3K27ac_motif, 
+           Motif.Name == promoters3.0[i,1] 
+           & Consensus == promoters3.0[i,2])$P.value
+}
+
+# intersetion venn plot
+# enhancers
+venn.plot <- venn.diagram(
+  x = list(H3K4me1=H3K4me1_motif$Motif.Name,H3K27ac=H3K27ac_motif$Motif.Name),
+  filename = NULL,
+  lwd = 2,
+  fill = c("lightblue", "darkorchid1"),
+  alpha = 0.75,
+  label.col = "black",
+  cex = 3,
+  fontface = "bold",
+  cat.col = c("lightblue", "darkorchid1"),
+  cat.cex = 1,
+  cat.fontface = "bold",
+  main = "Enhancer Motifs",
+  scaled=T
+)
+grid.newpage()
+grid.draw(venn.plot)
+
+# promotors
+venn.plot <- venn.diagram(
+  x = list(H3K4me3=H3K4me3_motif$Motif.Name,H3K27ac=H3K27ac_motif$Motif.Name,POLR2A=POLR2A_motif$Motif.Name),
+  filename = NULL,
+  lwd = 2,
+  fill = c("cornflowerblue", "darkorchid1", "pink"),
+  alpha = 0.75,
+  label.col = "black",
+  cex = 2,
+  fontfamily = "serif",
+  fontface = "bold",
+  cat.col = c("cornflowerblue", "darkorchid1","pink"),
+  cat.cex = 1,
+  cat.fontfamily = "serif",
+  cat.fontface = "bold",
+  main = "Promoter Motifs",
+  scaled=T
+)
+grid.newpage()
+grid.draw(venn.plot)
+
